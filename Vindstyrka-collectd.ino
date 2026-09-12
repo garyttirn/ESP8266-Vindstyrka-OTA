@@ -1,14 +1,19 @@
 /**
- * ESP8266 SEN54/IKEA Vindstyrka collectd integration.
+ * ESP8266 SEN54/IKEA Vindsyrka + Sensirion SCD41 (CO2) +  MICS-5524 (CO) with collectd integration.
  *
  * Partly based on
  *  https://github.com/techniker/sen54_mqtt
- *  https://github.com/Sensirion/arduino-i2c-sen5x/blob/master/examples/exampleUsage/exampleUsage.ino
  *  
- * Uses Sensirion I2C SEN5X Arduino Library 
+ * Uses Sensirion I2C SEN5X Library
  *   https://github.com/Sensirion/arduino-i2c-sen5x
  *
- * To be powered by the Vindtyrka
+ * Uses Sensirion I2C SCD4X Library
+ *   https://github.com/Sensirion/arduino-i2c-scd4x
+ *
+ * Uses DFRobot MICS Library
+ *   https://github.com/DFRobot/DFRobot_MICS/
+ *
+ * ESP8266 and all sensors powered by the Vindtyrkan
  * 
  **/
 
@@ -22,6 +27,16 @@
 #include <Wire.h>
 #include <WiFiUdp.h>
 #include "collectd-protocol.h"
+
+//Sensirion SCD41
+#include <SensirionI2cScd4x.h>
+
+//DFRobot MiCS-5524 Library
+#include "DFRobot_MICS.h"
+
+#define CALIBRATION_TIME   2    // Default calibration time is three minutes
+#define ADC_PIN            A0   // Analog pin connected to the sensor's analog output
+#define POWER_PIN          2    // Digital pin to power the sensor
 
 //WebSerial
 #include <ESPAsyncTCP.h>
@@ -42,9 +57,24 @@ WiFiUDP udp_handler;
 
 SensirionI2CSen5x sen5x;
 
+SensirionI2cScd4x scd4x;
+
 // WebSerial
 // Initiate HTTP server
 AsyncWebServer server(80);
+
+//Read CO
+DFRobot_MICS_ADC mics(ADC_PIN, 0);
+
+unsigned long lastReadTime = 0;
+
+String ProgramVersion  = "0.2";
+
+double massConcentrationPm1p0=0.0, massConcentrationPm2p5=0.0, massConcentrationPm4p0=0.0, massConcentrationPm10p0=0.0;
+double ambientHumidity=0.0, ambientTemperature=0.0, vocIndex=0.0;
+double co2Concentration=0.0; //SCD41
+double coConcentration=0.0; //MICS
+double glb_rssi=0.0;
 
 void SerPrintf(const char *format, ...) {
   char buffer[256]; 
@@ -101,71 +131,6 @@ void recvMsg(uint8_t *data, size_t len){
     (defined(BUFFER_LENGTH) && BUFFER_LENGTH >= MAXBUF_REQUIREMENT)
 #define USE_PRODUCT_INFO
 #endif
-
-//Read voltage
-ADC_MODE(ADC_VCC);
-
-unsigned long lastReadTime = 0;
-
-String ProgramVersion  = "0.1";
-
-double massConcentrationPm1p0=0.0, massConcentrationPm2p5=0.0, massConcentrationPm4p0=0.0, massConcentrationPm10p0=0.0;
-double ambientHumidity=0.0, ambientTemperature=0.0, vocIndex=0.0;
-double glb_vcc=0.0, glb_rssi=0.0;
-
-void printModuleVersions() {
-    uint16_t error;
-    char errorMessage[256];
-
-    unsigned char productName[32];
-    uint8_t productNameSize = 32;
-
-    error = sen5x.getProductName(productName, productNameSize);
-
-    if (error) {
-        Serial.print("Error trying to execute getProductName(): ");
-        errorToString(error, errorMessage, 256);
-        SerPrintfLn(errorMessage);
-    } else {
-        Serial.print("ProductName:");
-        SerPrintfLn((char*)productName);
-
-    }
-
-    uint8_t firmwareMajor;
-    uint8_t firmwareMinor;
-    bool firmwareDebug;
-    uint8_t hardwareMajor;
-    uint8_t hardwareMinor;
-    uint8_t protocolMajor;
-    uint8_t protocolMinor;
-
-    error = sen5x.getVersion(firmwareMajor, firmwareMinor, firmwareDebug,
-                             hardwareMajor, hardwareMinor, protocolMajor,
-                             protocolMinor);
-    if (error) {
-        errorToString(error, errorMessage, 256);
-        SerPrintfLn("Error trying to execute getVersion(): " + String((char*) errorMessage));
-    } else {
-        SerPrintfLn("Firmware: " + String(firmwareMajor) + "." + String(firmwareMinor));
-        SerPrintfLn("Hardware: " + String(hardwareMajor) + "." + String(hardwareMinor));
-    }
-}
-
-void printSerialNumber() {
-    uint16_t error;
-    char errorMessage[256];
-    unsigned char serialNumber[32];
-    uint8_t serialNumberSize = 32;
-
-    error = sen5x.getSerialNumber(serialNumber, serialNumberSize);
-    if (error) {
-        errorToString(error, errorMessage, 256);
-        SerPrintfLn("Error trying to execute getSerialNumber(): " + String((char*) errorMessage));
-    } else {
-        SerPrintfLn("SerialNumber:" + String((char*)serialNumber));
-    }
-}
 
 //OTA callback update_started()
 void update_started() {
@@ -240,19 +205,21 @@ int connect_wifi (){
 return wifiStatus;
 }
 
-int ReadSensor() {
+int ReadSens5x() {
 
   bool status = false;
-  uint16_t error; 
+  uint16_t error;
 
   float t_pm1 = 0.0f, t_pm2_5 = 0.0f, t_pm4 = 0.0f, t_pm10 = 0.0f;
   float t_hum = 0.0f, t_temp = 0.0f, t_voc = 0.0f, t_nox = 0.0f;
+
+  SerPrintfLn("\nReading SENS54 sensor...");
 
   //Check for data
   error =  sen5x.readDataReady(status);
 
   if (error && !status) {
-    SerPrintfLn("Sensor data not ready to read sensor values");
+    SerPrintfLn("SENS54 data not ready to read sensor values");
     return 1;
   }
 
@@ -260,7 +227,7 @@ int ReadSensor() {
   error = sen5x.readMeasuredValues(t_pm1, t_pm2_5, t_pm4, t_pm10, 
                                    t_hum, t_temp, t_voc, t_nox);
   if (error) {
-    SerPrintfLn("Failed to read sensor values");
+    SerPrintfLn("Failed to read SENS54 values");
     return 1;
   }
 
@@ -273,15 +240,69 @@ int ReadSensor() {
   ambientTemperature=(double)t_temp;
   vocIndex=(double)t_voc;
 
+  SerPrintfLn("Temp: " + String(ambientTemperature) + " Hum: " + String(ambientHumidity) + " VOC: " + String(vocIndex) \
+  + "\nPM1.0: " + String(massConcentrationPm1p0) \
+  + " PM2.5: " + String(massConcentrationPm2p5) \
+  + " PM4.0: " + String(massConcentrationPm4p0) \
+  + " PM10.0: " + String(massConcentrationPm10p0));
+
   return 0;
 }
 
-float getVccs(){
+int ReadScd4x() {
 
-  glb_vcc=0.0;
-  glb_vcc= (double) ESP.getVcc();
-    
- SerPrintfLn("PSU VCC: " + String(glb_vcc*0.001)+ "V");
+  bool status = false;
+  uint16_t error; 
+
+  uint16_t t_co2 = 0;
+  float t_hum = 0.0f, t_temp = 0.0f;
+
+  SerPrintfLn("\nReading SCD41 sensor...");
+
+  error = scd4x.getDataReadyStatus(status);
+
+  if (error && !status) {
+    SerPrintfLn("SC41 Sensor data not ready to read sensor values");
+    return 1;
+  }
+
+  error = scd4x.readMeasurement(t_co2, t_temp, t_hum);
+
+  if (error) {
+    SerPrintfLn("Failed to read SCD41 values");
+    return 1;
+  }
+
+  SerPrintfLn("Temp: " + String(t_temp) + " Hum: " + String(ambientHumidity) + " CO2: " + String(t_co2) + "ppm");
+
+  //floats to double as collectd expects
+  co2Concentration=(double) t_co2;
+
+  return 0;
+}
+
+int ReadMICS(){
+
+  SerPrintfLn("\nReading MICS sensor...");
+
+  mics.wakeUpMode();
+
+  // Wait calibration time, do not care about millis overlow and few lost measurements
+  if (lastReadTime < CALIBRATION_TIME*60000) {
+    SerPrintfLn("MICS Sensor data not ready to read sensor values");
+    return 1;
+  }
+
+  // Read raw ADC data from the sensor
+  float t_adc = mics.getADCData(OX_MODE);
+
+  // Read gas data from the sensor
+  float t_co = mics.getGasData(CO);
+
+  SerPrintfLn("RAW ADC: " + String(t_adc) + " CO: " + String(t_co) + "ppm\n");
+
+  //floats to double as collectd expects
+  coConcentration=(double) t_co;
 
   return 0; 
 }
@@ -344,17 +365,23 @@ void send_data_to_collectd (void)
   collectd_add_string(packet, TYPE_TYPE_INSTANCE, (char*) "rssi");
   collectd_add_value(packet, COLLECTD_VALUETYPE_GAUGE, (double*) &glb_rssi);
 
-  //VCC
-  collectd_add_string(packet, TYPE_TYPE_INSTANCE,(char*) "vcc");
-  collectd_add_value(packet, COLLECTD_VALUETYPE_GAUGE, (double*) &glb_vcc);
-  
-  SerPrintfLn("Temp: " + String(ambientTemperature) + "  Hum: " + String(ambientHumidity) + "  VOC: " + String(vocIndex) \
-  + "\nPM1.0: " + String(massConcentrationPm1p0) \
-  + "  PM2.5: " + String(massConcentrationPm2p5) \
-  + "  PM4.0: " + String(massConcentrationPm4p0) \
-  + "  PM10.0: " + String(massConcentrationPm10p0));
+  //CO2
+  collectd_add_string(packet, TYPE_TYPE_INSTANCE,(char*) "co2");
+  collectd_add_value(packet, COLLECTD_VALUETYPE_GAUGE, (double*) &co2Concentration);
+
+  //CO
+  collectd_add_string(packet, TYPE_TYPE_INSTANCE,(char*) "co");
+  collectd_add_value(packet, COLLECTD_VALUETYPE_GAUGE, (double*) &coConcentration);
 
   SerPrintfLn( "Sending packet to " + String(CollectdIP[0]) + "." + String(CollectdIP[1]) + "." + String(CollectdIP[2]) + "." + String(CollectdIP[3]) + ":" +  String(CollectdPort));
+  SerPrintfLn("Temp: " + String(ambientTemperature) + " Hum: " + String(ambientHumidity) + " VOC: " + String(vocIndex) \
+  + "\nPM1.0: " + String(massConcentrationPm1p0) \
+  + " PM2.5: " + String(massConcentrationPm2p5) \
+  + " PM4.0: " + String(massConcentrationPm4p0) \
+  + " PM10.0: " + String(massConcentrationPm10p0) \
+  + " CO2: " + String(co2Concentration) \
+  + " CO: " + String(coConcentration) \
+  + " RSSI: " + String(glb_rssi) + "dBm" );
 
   udp_handler.beginPacket(CollectdIP, atoi(CollectdPort));
   udp_handler.write(packet->buffer, packet->current_offset);
@@ -384,25 +411,44 @@ void setup() {
   //Check for OTA updates
   checkForUpdates();
 
+  //Init MICS
+  mics.begin();
+
   //Init Sensirion
   Wire.begin();
   sen5x.begin(Wire);
-
-  // Print SEN55 module information if i2c buffers are large enough
-  #ifdef USE_PRODUCT_INFO
-    printSerialNumber();
-    printModuleVersions();
-  #endif
+  scd4x.begin(Wire, SCD41_I2C_ADDR_62);
 
   //Offset temperature reading to compensate for the ESP8266 produced heat in the Vindstyrka case
   uint16_t error = sen5x.setTemperatureOffsetSimple(tempOffset);
   if (error) {
-     SerPrintfLn("Sensor temperature offset has failed");
+     SerPrintfLn("SENS54 temperature offset has failed");
   }
   
   error = sen5x.startMeasurement();
   if (error) {
-        SerPrintfLn("Failed to start measurement");
+        SerPrintfLn("Failed to start SENS54 measurement");
+  }
+
+  //Prepare SCD41
+  error = scd4x.wakeUp();
+  if (error) {
+        SerPrintfLn("Failed to wake SCD41");
+  }
+
+  error = scd4x.stopPeriodicMeasurement();
+  if (error) {
+        SerPrintfLn("Failed to stop SCD41 periodic measurement");
+  }
+
+  error = scd4x.reinit();
+  if (error) {
+        SerPrintfLn("Failed to reinit SCD41");
+  }
+
+  error = scd4x.startPeriodicMeasurement();
+  if (error) {
+        SerPrintfLn("Failed to start SCD41 periodic measurement");
   }
 
   SerPrintfLn("Read loop started");
@@ -414,15 +460,18 @@ void loop() {
     if (currentMillis - lastReadTime >= (readInterval + timingOffset)) {
         lastReadTime = currentMillis;
 
-       // Read voltage and WIFi RSSI
-       getVccs();
-       getRSSI();
+       //Read Sensirion Sens5X and report at reportingInterval
+        if ( ReadSens5x() == 0 && currentMillis%reportingInterval < 2900) {
 
-       //Read Sensirion and report at reportingInterval
-        if ( ReadSensor() == 0 && currentMillis%reportingInterval < 2900) {
+          ReadScd4x();
+          ReadMICS();
+
+          // Read WIFi RSSI
+          getRSSI();
           send_data_to_collectd();
         }
-    SerPrintfLn(String(ESPName) + " " + String(FWVersion) + " lastReadTime : " + String(lastReadTime) + " reportingInterval : " + String(lastReadTime%reportingInterval));
+
+    // SerPrintfLn(String(ESPName) + " " + String(FWVersion) + " lastReadTime : " + String(lastReadTime) + " reportingInterval : " + String(lastReadTime%reportingInterval));
     }
     //Small sleep
     delay (100);

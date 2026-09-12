@@ -12,4 +12,4 @@ const char* ESPName = "Vindstyrka";
 const IPAddress CollectdIP = {192,168,1,3};
 const char* CollectdPort = "25826";
 const char* UpdateURL = "http://192.168.1.2:4080/8266OTA.php";
-const char* FWVersion = "01082026";
+const char* FWVersion = "12092026";
