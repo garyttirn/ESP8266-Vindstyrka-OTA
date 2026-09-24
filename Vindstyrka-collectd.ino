@@ -273,11 +273,13 @@ int ReadScd4x() {
     return 1;
   }
 
+  // Only update value if valid value
+  if (t_co2 > 0) {
+    //floats to double as collectd expects
+    co2Concentration=(double) t_co2;
+  }
+
   SerPrintfLn("Temp: " + String(t_temp) + " Hum: " + String(ambientHumidity) + " CO2: " + String(t_co2) + "ppm");
-
-  //floats to double as collectd expects
-  co2Concentration=(double) t_co2;
-
   return 0;
 }
 
