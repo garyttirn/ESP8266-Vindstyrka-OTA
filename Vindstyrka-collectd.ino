@@ -279,7 +279,7 @@ int ReadScd4x() {
     co2Concentration=(double) t_co2;
   }
 
-  SerPrintfLn("Temp: " + String(t_temp) + " Hum: " + String(ambientHumidity) + " CO2: " + String(t_co2) + "ppm");
+  SerPrintfLn("Temp: " + String(t_temp) + " Hum: " + String(t_hum) + " CO2: " + String(t_co2) + "ppm");
   return 0;
 }
 
@@ -368,8 +368,11 @@ void send_data_to_collectd (void)
   collectd_add_value(packet, COLLECTD_VALUETYPE_GAUGE, (double*) &glb_rssi);
 
   //CO2
-  collectd_add_string(packet, TYPE_TYPE_INSTANCE,(char*) "co2");
-  collectd_add_value(packet, COLLECTD_VALUETYPE_GAUGE, (double*) &co2Concentration);
+  // Only update value if valid value
+  if (co2Concentration > 0) {
+     collectd_add_string(packet, TYPE_TYPE_INSTANCE,(char*) "co2");
+     collectd_add_value(packet, COLLECTD_VALUETYPE_GAUGE, (double*) &co2Concentration);
+  }
 
   //CO
   collectd_add_string(packet, TYPE_TYPE_INSTANCE,(char*) "co");
@@ -463,9 +466,8 @@ void loop() {
         lastReadTime = currentMillis;
 
        //Read Sensirion Sens5X and report at reportingInterval
-        if ( ReadSens5x() == 0 && currentMillis%reportingInterval < 2900) {
-
-          ReadScd4x();
+        if ( ReadSens5x() == 0 && ReadScd4x() == 0 && currentMillis%reportingInterval < 2900) {
+          //Read also CO
           ReadMICS();
 
           // Read WIFi RSSI
