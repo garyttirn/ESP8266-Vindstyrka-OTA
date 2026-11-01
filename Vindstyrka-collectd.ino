@@ -58,6 +58,8 @@ WiFiUDP udp_handler;
 SensirionI2CSen5x sen5x;
 
 SensirionI2cScd4x scd4x;
+//Recalibrate on demand
+void scd4x_performForcedRecalibration();
 
 // WebSerial
 // Initiate HTTP server
@@ -119,6 +121,12 @@ void recvMsg(uint8_t *data, size_t len){
     SerPrintfLn("Rebooting.");
     delay (500);
     ESP.restart();
+  }
+
+  if (d == "RECALIBRATE" ) {
+    SerPrintfLn("Recalibrating.");
+    delay (500);
+    scd4x_performForcedRecalibration();
   }
 }
 
@@ -283,6 +291,36 @@ int ReadScd4x() {
   return 0;
 }
 
+void scd4x_performForcedRecalibration() {
+  // Stop active measurements so the sensor enters the IDLE state
+  uint16_t error = scd4x.stopPeriodicMeasurement();
+  if (error) {
+      SerPrintfLn("Error stopping measurement");
+      return;
+  }
+
+  uint16_t frcCorrection = 0;
+
+  // Command the sensor to recalibrate itself
+  // The sensor calculates its own internal offset and populates `frcCorrection`
+  error = scd4x.performForcedRecalibration(targetCo2Ppm, frcCorrection);
+
+  if (error) {
+      SerPrintfLn("FRC Failed!");
+  } else if (frcCorrection == 0xFFFF) {
+      SerPrintfLn("FRC Ignored: Sensor reading was too far out of range or unstable.");
+  } else {
+      SerPrintfLn("FRC Successful! Sensor offset adjusted by: " + String((int16_t)frcCorrection) + "ppm\n");
+
+      // Save calibration adjustment permanently to the sensor's EEPROM
+      scd4x.persistSettings();
+      Serial.println("Settings persisted to EEPROM.");
+  }
+
+  // Resume your standard monitoring
+  scd4x.startPeriodicMeasurement();
+}
+
 int ReadMICS(){
 
   SerPrintfLn("\nReading MICS sensor...");
@@ -441,6 +479,8 @@ void setup() {
         SerPrintfLn("Failed to wake SCD41");
   }
 
+
+
   error = scd4x.stopPeriodicMeasurement();
   if (error) {
         SerPrintfLn("Failed to stop SCD41 periodic measurement");
@@ -450,6 +490,9 @@ void setup() {
   if (error) {
         SerPrintfLn("Failed to reinit SCD41");
   }
+
+  // Disable automatic self-calibration
+  scd4x.setAutomaticSelfCalibrationEnabled(false);
 
   error = scd4x.startPeriodicMeasurement();
   if (error) {
